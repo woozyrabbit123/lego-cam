@@ -74,6 +74,7 @@ class HeuristicDetector:
         """
         self.min_area = min_area
         self.confidence = confidence
+        self.background_frame = None  # Optional background for subtraction
         logger.info(f"HeuristicDetector initialized (min_area={min_area})")
 
     def detect(self, frame: np.ndarray) -> list[dict]:
@@ -94,6 +95,16 @@ class HeuristicDetector:
 
         # Get frame dimensions
         height, width = frame.shape[:2]
+
+        # Apply background subtraction if calibrated
+        if self.background_frame is not None:
+            # Compute absolute difference between current frame and background
+            diff = cv2.absdiff(frame, self.background_frame)
+            # Threshold to create a mask of changed regions
+            gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+            _, fg_mask = cv2.threshold(gray_diff, 30, 255, cv2.THRESH_BINARY)
+            # Apply mask to frame to isolate foreground
+            frame = cv2.bitwise_and(frame, frame, mask=fg_mask)
 
         # Convert to HSV
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -157,6 +168,21 @@ class HeuristicDetector:
                 detections.append(detection)
 
         return detections
+
+    def calibrate_from_frame(self, frame: np.ndarray) -> None:
+        """
+        Calibrate the detector using the current frame as background.
+
+        This captures the current frame as a reference background, which will
+        be used for background subtraction in future detections. This helps
+        filter out static elements and focus on new objects.
+
+        Args:
+            frame: BGR image from OpenCV to use as background reference
+        """
+        # Store a copy of the frame as background
+        self.background_frame = frame.copy()
+        logger.info("Detector calibrated with new background frame")
 
 
 def draw_detections(frame: np.ndarray, detections: list[dict]) -> np.ndarray:
