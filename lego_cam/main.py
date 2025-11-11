@@ -11,6 +11,7 @@ import sqlite3
 import os
 import time
 import re
+import argparse
 from datetime import datetime
 from pathlib import Path
 import cv2
@@ -18,7 +19,8 @@ import numpy as np
 
 from . import config
 from .detection_heuristic import HeuristicDetector, draw_detections
-from .pipeline import start_capture_thread, start_detection_thread
+from .detection_yolo import YoloDetector, YoloDetectorError
+from .pipeline import start_capture_thread, start_detection_thread, DetectionBackendState
 from .db import init_db, create_session, start_db_worker
 
 # Set up logging
@@ -55,6 +57,7 @@ def draw_hud(
     session_tag: str | None,
     segment_index: int,
     detection_count: int,
+    backend_state: DetectionBackendState,
     paused: bool = False,
 ) -> np.ndarray:
     """
@@ -66,6 +69,7 @@ def draw_hud(
         session_tag: Session tag or None
         segment_index: Current segment index
         detection_count: Number of detections in current frame
+        backend_state: Detection backend state (mode and current backend)
         paused: Whether the system is paused
 
     Returns:
@@ -74,8 +78,19 @@ def draw_hud(
     x, y = config.HUD_POSITION
     line_height = config.HUD_LINE_HEIGHT
 
-    # Line 1: App title
-    text = config.HUD_TEXT
+    # Line 1: App title with mode and backend
+    mode_str = backend_state.mode.value.upper()
+    backend_str = backend_state.backend.upper()
+
+    # Show fallback indicator for AUTO mode
+    if backend_state.mode == config.DetectionMode.AUTO and backend_state.fallback_count > 0:
+        backend_str = f"FALLBACK→{backend_str}"
+
+    # Show broken indicator for SMART mode
+    if backend_state.detector_broken:
+        backend_str = "BROKEN"
+
+    text = f"Lego Cam v1  [{mode_str} / {backend_str}]"
     if paused:
         text += " [PAUSED]"
 
@@ -271,9 +286,10 @@ def ui_loop(
     stop_event: threading.Event,
     ui_queue: queue.Queue,
     db_queue: queue.Queue,
-    detector: HeuristicDetector,
+    detector,
     session_id: int,
     session_tag: str | None,
+    backend_state: DetectionBackendState,
 ) -> None:
     """
     Main UI loop - MUST run in main thread for OpenCV.
@@ -292,6 +308,7 @@ def ui_loop(
         detector: Detector instance for calibration
         session_id: Current session ID
         session_tag: Session tag or None
+        backend_state: Detection backend state for HUD display
     """
     logger.info("UI loop started")
 
@@ -341,6 +358,7 @@ def ui_loop(
                     session_tag,
                     segment_index,
                     len(last_detections),
+                    backend_state,
                     paused=paused,
                 )
 
@@ -427,6 +445,95 @@ def ui_loop(
         logger.info("UI loop stopped, windows destroyed")
 
 
+def create_detector(mode: config.DetectionMode):
+    """
+    Create detector instance based on detection mode.
+
+    Args:
+        mode: Detection mode (FAST/SMART/AUTO)
+
+    Returns:
+        Tuple of (detector, backend_name)
+
+    Raises:
+        SystemExit: If SMART mode requires YOLO but it's unavailable
+    """
+    if mode == config.DetectionMode.FAST:
+        # FAST mode: always use heuristic
+        logger.info("FAST mode: Creating heuristic detector")
+        detector = HeuristicDetector(
+            min_area=config.MIN_CONTOUR_AREA,
+            confidence=config.HEURISTIC_CONFIDENCE,
+        )
+        return detector, "heuristic"
+
+    elif mode == config.DetectionMode.SMART:
+        # SMART mode: YOLO only, fail hard if unavailable
+        logger.info("SMART mode: Creating YOLO detector (GPU required)")
+        try:
+            detector = YoloDetector(
+                weights_path=config.YOLO_WEIGHTS_PATH,
+                device=config.YOLO_DEVICE,
+                conf_threshold=config.YOLO_CONF_THRESHOLD,
+            )
+            logger.info("SMART mode: YOLO detector created successfully")
+            return detector, "yolo"
+        except YoloDetectorError as e:
+            logger.error(f"SMART mode: Failed to create YOLO detector: {e}")
+            logger.error("SMART mode requires YOLO. Please use --mode fast or --mode auto instead.")
+            sys.exit(1)
+
+    elif mode == config.DetectionMode.AUTO:
+        # AUTO mode: Try YOLO, fall back to heuristic if unavailable
+        logger.info("AUTO mode: Attempting to create YOLO detector")
+        try:
+            detector = YoloDetector(
+                weights_path=config.YOLO_WEIGHTS_PATH,
+                device=config.YOLO_DEVICE,
+                conf_threshold=config.YOLO_CONF_THRESHOLD,
+            )
+            logger.info("AUTO mode: YOLO detector created successfully")
+            return detector, "yolo"
+        except YoloDetectorError as e:
+            logger.warning(f"AUTO mode: Failed to create YOLO detector: {e}")
+            logger.warning("AUTO mode: Falling back to heuristic detector")
+            detector = HeuristicDetector(
+                min_area=config.MIN_CONTOUR_AREA,
+                confidence=config.HEURISTIC_CONFIDENCE,
+            )
+            return detector, "heuristic"
+
+    else:
+        raise ValueError(f"Unknown detection mode: {mode}")
+
+
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Lego Cam v1 - Real-time LEGO detection with GPU acceleration",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Detection Modes:
+  fast   - Heuristic detection only (CPU, always available)
+  smart  - YOLO detection only (GPU required, fails if unavailable)
+  auto   - YOLO with automatic fallback to heuristic (recommended)
+
+Examples:
+  python -m lego_cam --mode fast
+  python -m lego_cam --mode smart
+  python -m lego_cam --mode auto  (default)
+        """
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["fast", "smart", "auto"],
+        default=config.DEFAULT_DETECTION_MODE.value,
+        help=f"Detection mode (default: {config.DEFAULT_DETECTION_MODE.value})"
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
     """
     Main entry point for Lego Cam.
@@ -434,13 +541,28 @@ def main() -> int:
     Returns:
         Exit code (0 for success)
     """
+    # Parse arguments
+    args = parse_args()
+    detection_mode = config.DetectionMode(args.mode)
+
     logger.info("=" * 60)
-    logger.info("Lego Cam v0 - Heuristic Detection")
+    logger.info(f"Lego Cam v1 - Mode: {detection_mode.value.upper()}")
     logger.info("=" * 60)
 
     # Initialize database
     logger.info(f"Initializing database: {config.DB_PATH}")
     init_db(config.DB_PATH)
+
+    # Create detector based on mode
+    detector, backend_name = create_detector(detection_mode)
+
+    # Create backend state
+    backend_state = DetectionBackendState(
+        mode=detection_mode,
+        backend=backend_name,
+    )
+
+    logger.info(f"Detection backend: {backend_name}")
 
     # Prompt for session tag
     print("\n" + "=" * 60)
@@ -460,6 +582,8 @@ def main() -> int:
     logger.info(f"Session ID: {session_id}")
     if session_tag:
         logger.info(f"Session tag: {session_tag}")
+    logger.info(f"Detection mode: {detection_mode.value.upper()}")
+    logger.info(f"Detection backend: {backend_name}")
     logger.info(f"Resolution: {config.RESOLUTION}")
     logger.info(f"Target FPS: {config.TARGET_FPS}")
     logger.info("Controls:")
@@ -478,18 +602,12 @@ def main() -> int:
     ui_queue = queue.Queue(maxsize=config.UI_QUEUE_SIZE)
     db_queue = queue.Queue(maxsize=config.DB_QUEUE_SIZE)
 
-    # Create detector (using heuristic detector now)
-    detector = HeuristicDetector(
-        min_area=config.MIN_CONTOUR_AREA,
-        confidence=config.HEURISTIC_CONFIDENCE,
-    )
-
     # Start threads
     logger.info("Starting worker threads...")
 
     capture_thread = start_capture_thread(stop_event, capture_queue)
     detection_thread = start_detection_thread(
-        stop_event, capture_queue, ui_queue, db_queue, detector, session_id
+        stop_event, capture_queue, ui_queue, db_queue, detector, session_id, backend_state
     )
     db_thread = start_db_worker(config.DB_PATH, db_queue, stop_event)
 
@@ -497,7 +615,7 @@ def main() -> int:
 
     # Run UI loop in main thread (required by OpenCV)
     try:
-        ui_loop(stop_event, ui_queue, db_queue, detector, session_id, session_tag)
+        ui_loop(stop_event, ui_queue, db_queue, detector, session_id, session_tag, backend_state)
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
         stop_event.set()
