@@ -20,6 +20,7 @@ import numpy as np
 from . import config
 from .detection_heuristic import HeuristicDetector, draw_detections
 from .detection_yolo import YoloDetector, YoloDetectorError
+from .detection_stub import DetectorHolder
 from .pipeline import start_capture_thread, start_detection_thread, DetectionBackendState
 from .db import init_db, create_session, start_db_worker
 
@@ -286,7 +287,7 @@ def ui_loop(
     stop_event: threading.Event,
     ui_queue: queue.Queue,
     db_queue: queue.Queue,
-    detector,
+    detector_holder: DetectorHolder,
     session_id: int,
     session_tag: str | None,
     backend_state: DetectionBackendState,
@@ -305,7 +306,7 @@ def ui_loop(
         stop_event: Event to signal shutdown to other threads
         ui_queue: Queue to receive (frame, detections) tuples
         db_queue: Queue to send DB jobs
-        detector: Detector instance for calibration
+        detector_holder: DetectorHolder with current detector for calibration
         session_id: Current session ID
         session_tag: Session tag or None
         backend_state: Detection backend state for HUD display
@@ -417,8 +418,10 @@ def ui_loop(
 
             elif key == config.KEY_CALIBRATE:
                 # Calibrate detector with current raw frame
+                # This uses detector_holder.detector to ensure we calibrate the active detector
+                # (important in AUTO mode after fallback from YOLO to heuristic)
                 if last_raw_frame is not None:
-                    detector.calibrate_from_frame(last_raw_frame)
+                    detector_holder.detector.calibrate_from_frame(last_raw_frame)
                     message = "Calibrated"
                     message_expire_time = time.time() + config.MESSAGE_DURATION
                     logger.info("Detector calibrated")
@@ -556,6 +559,10 @@ def main() -> int:
     # Create detector based on mode
     detector, backend_name = create_detector(detection_mode)
 
+    # Wrap detector in holder to enable sharing between threads
+    # This allows AUTO mode fallback and calibration to work on the same detector instance
+    detector_holder = DetectorHolder(detector=detector)
+
     # Create backend state
     backend_state = DetectionBackendState(
         mode=detection_mode,
@@ -607,7 +614,7 @@ def main() -> int:
 
     capture_thread = start_capture_thread(stop_event, capture_queue)
     detection_thread = start_detection_thread(
-        stop_event, capture_queue, ui_queue, db_queue, detector, session_id, backend_state
+        stop_event, capture_queue, ui_queue, db_queue, detector_holder, session_id, backend_state
     )
     db_thread = start_db_worker(config.DB_PATH, db_queue, stop_event)
 
@@ -615,7 +622,7 @@ def main() -> int:
 
     # Run UI loop in main thread (required by OpenCV)
     try:
-        ui_loop(stop_event, ui_queue, db_queue, detector, session_id, session_tag, backend_state)
+        ui_loop(stop_event, ui_queue, db_queue, detector_holder, session_id, session_tag, backend_state)
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
         stop_event.set()
@@ -627,10 +634,16 @@ def main() -> int:
     logger.info("Shutting down...")
     logger.info("Ending session in database...")
 
-    # Enqueue end_session job
+    # Enqueue end_session job first
     db_queue.put({
         "type": "end_session",
         "session_id": session_id,
+    })
+
+    # Then enqueue shutdown sentinel to tell DB worker to exit
+    # This guarantees end_session is processed before worker stops
+    db_queue.put({
+        "type": "shutdown",
     })
 
     # Wait for threads to finish

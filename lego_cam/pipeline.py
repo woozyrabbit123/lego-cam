@@ -12,7 +12,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from . import config
-from .detection_stub import Detector
+from .detection_stub import Detector, DetectorHolder
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ def detection_thread_fn(
     capture_queue: queue.Queue,
     ui_queue: queue.Queue,
     db_queue: queue.Queue,
-    detector: Detector,
+    detector_holder: DetectorHolder,
     session_id: int,
     backend_state: DetectionBackendState,
 ) -> None:
@@ -132,18 +132,19 @@ def detection_thread_fn(
 
     This thread:
     - Reads frames from capture_queue
-    - Runs detector.detect() on each frame
+    - Runs detector_holder.detector.detect() on each frame
     - Puts (frame, detections) tuple into ui_queue
     - Enqueues frame job to db_queue for logging
     - Handles queue overflow by overwriting old data
     - Handles YOLO errors and fallback logic based on detection mode
+    - Updates detector_holder.detector on AUTO mode fallback
 
     Args:
         stop_event: Event to signal thread shutdown
         capture_queue: Queue to receive captured frames
         ui_queue: Queue to send (frame, detections) tuples
         db_queue: Queue to send DB jobs
-        detector: Detector instance to run on frames
+        detector_holder: DetectorHolder with current detector instance
         session_id: Current session ID for DB logging
         backend_state: Shared state object for mode and backend tracking
     """
@@ -154,7 +155,6 @@ def detection_thread_fn(
 
     detection_count = 0
     last_log_time = time.time()
-    current_detector = detector
 
     try:
         while not stop_event.is_set():
@@ -176,7 +176,7 @@ def detection_thread_fn(
                 detections = []
             else:
                 try:
-                    detections = current_detector.detect(frame)
+                    detections = detector_holder.detector.detect(frame)
 
                 except Exception as e:
                     # Handle detection errors based on mode
@@ -201,10 +201,14 @@ def detection_thread_fn(
 
                             # Create fallback heuristic detector
                             from .detection_heuristic import HeuristicDetector
-                            current_detector = HeuristicDetector(
+                            fallback_detector = HeuristicDetector(
                                 min_area=config.MIN_CONTOUR_AREA,
                                 confidence=config.HEURISTIC_CONFIDENCE,
                             )
+
+                            # Update the shared detector holder
+                            # This ensures UI calibration will target the new detector
+                            detector_holder.detector = fallback_detector
 
                             # Update backend state
                             backend_state.backend = "heuristic"
@@ -212,7 +216,7 @@ def detection_thread_fn(
 
                             # Try detection again with heuristic
                             try:
-                                detections = current_detector.detect(frame)
+                                detections = detector_holder.detector.detect(frame)
                             except Exception as fallback_error:
                                 logger.error(
                                     f"Fallback heuristic detection also failed: {fallback_error}"
@@ -302,7 +306,7 @@ def start_detection_thread(
     capture_queue: queue.Queue,
     ui_queue: queue.Queue,
     db_queue: queue.Queue,
-    detector: Detector,
+    detector_holder: DetectorHolder,
     session_id: int,
     backend_state: DetectionBackendState,
 ) -> threading.Thread:
@@ -314,7 +318,7 @@ def start_detection_thread(
         capture_queue: Queue to receive captured frames
         ui_queue: Queue to send detection results
         db_queue: Queue to send DB jobs
-        detector: Detector instance to use
+        detector_holder: DetectorHolder with current detector instance
         session_id: Current session ID for DB logging
         backend_state: Shared state for mode and backend tracking
 
@@ -323,7 +327,7 @@ def start_detection_thread(
     """
     thread = threading.Thread(
         target=detection_thread_fn,
-        args=(stop_event, capture_queue, ui_queue, db_queue, detector, session_id, backend_state),
+        args=(stop_event, capture_queue, ui_queue, db_queue, detector_holder, session_id, backend_state),
         name="DetectionThread",
         daemon=True,
     )

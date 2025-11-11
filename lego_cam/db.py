@@ -230,6 +230,9 @@ class DBWorker:
     def run(self) -> None:
         """
         Main worker loop: consume jobs, batch them, and commit periodically.
+
+        Loop continues until a "shutdown" job is received. This ensures all
+        jobs (including "end_session") are processed before the worker exits.
         """
         logger.info("DB worker started")
 
@@ -240,11 +243,21 @@ class DBWorker:
 
             pending_jobs = []
             last_commit_time = time.time()
+            shutdown_requested = False
 
-            while not self.stop_event.is_set() or not self.db_queue.empty():
+            while not shutdown_requested:
                 try:
                     # Try to get a job with timeout
                     job = self.db_queue.get(timeout=0.1)
+
+                    # Check for shutdown sentinel
+                    if job.get("type") == "shutdown":
+                        logger.info("Shutdown job received")
+                        shutdown_requested = True
+                        # Don't add shutdown job to pending_jobs
+                        self.db_queue.task_done()
+                        break
+
                     pending_jobs.append(job)
                     self.db_queue.task_done()
                 except queue.Empty:
@@ -262,9 +275,9 @@ class DBWorker:
                     pending_jobs.clear()
                     last_commit_time = current_time
 
-            # Process remaining jobs on shutdown
+            # Process remaining jobs before shutdown
             if pending_jobs:
-                logger.info(f"Processing final batch of {len(pending_jobs)} jobs")
+                logger.info(f"Processing final batch of {len(pending_jobs)} jobs before shutdown")
                 self._process_batch(pending_jobs)
 
         except Exception as e:
