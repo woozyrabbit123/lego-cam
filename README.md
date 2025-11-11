@@ -50,24 +50,29 @@ python -m lego_cam --mode auto
 
 ## Features by Version
 
-### v1 (Current)
+### v2 (Current)
 - ✅ YOLOv8n GPU detection
 - ✅ HSV heuristic detection
 - ✅ Three detection modes (FAST/SMART/AUTO)
 - ✅ Automatic fallback in AUTO mode
-- ✅ CLI argument parsing (--mode)
+- ✅ Adaptive detection interval (frame skipping)
+- ✅ Idle/static scene detection
+- ✅ Scan mode for quick dense detection
+- ✅ Bookmarks for marking interesting frames
 - ✅ SQLite session and detection logging
 - ✅ Segment markers for logical grouping
 - ✅ Snapshot saving
 - ✅ Background calibration
 - ✅ Quit confirmation
-- ✅ Enhanced HUD with mode/backend display
+- ✅ Enhanced HUD with N and scene state
+- ✅ **Offline CLI for reports and exports**
+- ✅ **Export detections to CSV**
+- ✅ **Export summaries to JSON**
 
-### Planned (v2+)
+### Planned (v3+)
 - 🔜 YOLO + Heuristic fusion (run both, merge results)
 - 🔜 Custom YOLO training for LEGO-specific classes
 - 🔜 Per-brick identification and tracking
-- 🔜 Data export to CSV/JSON
 - 🔜 FPS counter in HUD
 - 🔜 Configurable HSV color ranges
 
@@ -283,6 +288,91 @@ Press `b` to bookmark the current frame:
 - **Use case**: Mark interesting frames for later review
 
 Both `scans` and `bookmarks` are counted in the session summary on exit.
+
+## Offline Reports & Exports (v2)
+
+After running live sessions, you can analyze and export data using the offline CLI tool:
+
+### List All Sessions
+
+```bash
+python -m lego_cam.cli list-sessions
+```
+
+**Output:**
+```
+ID  Tag                    Frames  Detections  Duration   Open?
+----------------------------------------------------------------------
+1   BOX: mixed colors      1450    3021        00:05:23   no
+2   test idle scene        230     120         00:00:45   yes
+3   (no tag)               890     1567        00:03:12   no
+```
+
+Shows all sessions with overview statistics. "Open?" indicates if the session has an `ended_at` timestamp (no = closed, yes = still open/crashed).
+
+### Detailed Session Summary
+
+```bash
+python -m lego_cam.cli summary --session-id 3
+```
+
+**Output:**
+```
+Session 3 – BOX: green tub
+Duration: 00:04:12  (frames: 980, detections: 2210, avg/frame: 2.26)
+
+Segments:
+  #1   frames=350     detections=800
+  #2   frames=330     detections=700
+  #3   frames=300     detections=710
+
+Colors:
+  red          1100
+  blue          600
+  yellow        400
+  green         110
+
+Labels:
+  brick        2210
+
+Scans: 2
+Bookmarks: 5
+```
+
+Shows comprehensive statistics including:
+- Session metadata (tag, duration, frame/detection counts)
+- Per-segment breakdown
+- Detection counts by color and label
+- Number of scans and bookmarks
+
+### Export Session Data
+
+```bash
+# Export both CSV and JSON (default)
+python -m lego_cam.cli export --session-id 3 --out exports --format both
+
+# Export only CSV detections
+python -m lego_cam.cli export --session-id 3 --out my_exports --format csv
+
+# Export only JSON summary
+python -m lego_cam.cli export --session-id 3 --out my_exports --format json
+```
+
+**Output:**
+```
+Exported CSV to exports/session_3_detections.csv
+Exported JSON summary to exports/session_3_summary.json
+```
+
+**CSV format** (`session_N_detections.csv`):
+- Columns: `session_id`, `frame_timestamp`, `segment_index`, `label`, `color`, `confidence`, `x_min`, `y_min`, `x_max`, `y_max`
+- One row per detection
+- Suitable for analysis in spreadsheets, pandas, etc.
+
+**JSON format** (`session_N_summary.json`):
+- Complete session metadata and statistics
+- Includes: overview, segments, color/label counts, scans, bookmarks
+- Suitable for programmatic analysis and archival
 
 ### Troubleshooting
 
