@@ -4,6 +4,7 @@ Defines the Protocol that all detectors must implement.
 """
 
 from typing import Protocol
+from dataclasses import dataclass
 import numpy as np
 
 
@@ -44,6 +45,19 @@ class Detector(Protocol):
             frame: BGR image from OpenCV to use for calibration
         """
         ...
+
+
+@dataclass
+class DetectorHolder:
+    """
+    Mutable holder for a Detector instance.
+
+    This allows the UI thread and detection thread to share a reference
+    to the current detector. When AUTO mode falls back from YOLO to heuristic,
+    the detection thread can update detector_holder.detector, and the UI
+    thread (for calibration) will automatically use the new detector.
+    """
+    detector: Detector
 
 
 class StubDetector:
