@@ -33,6 +33,20 @@ HUD_FONT_SCALE = 0.6
 HUD_COLOR = (0, 255, 0)  # Green in BGR
 HUD_THICKNESS = 2
 
+# Message overlay settings
+MESSAGE_DURATION = 2.0  # seconds to show temporary messages
+MESSAGE_FONT_SCALE = 0.7
+MESSAGE_COLOR = (0, 255, 255)  # Yellow in BGR
+MESSAGE_POSITION = (10, 80)  # Below HUD
+
+# Quit confirmation settings
+QUIT_CONFIRM_TIMEOUT = 2.0  # seconds to wait for second 'q' press
+QUIT_CONFIRM_COLOR = (0, 0, 255)  # Red in BGR
+QUIT_CONFIRM_BG_COLOR = (0, 0, 128)  # Dark red background
+
+# Snapshot settings
+SNAPSHOTS_DIR = "snapshots"  # Directory for saved snapshots
+
 # Thread settings
 THREAD_JOIN_TIMEOUT = 2.0  # seconds
 QUEUE_GET_TIMEOUT = 0.1  # seconds
@@ -40,3 +54,6 @@ QUEUE_GET_TIMEOUT = 0.1  # seconds
 # Hotkeys
 KEY_QUIT = ord('q')
 KEY_PAUSE = ord('p')
+KEY_SNAPSHOT = ord('s')
+KEY_CALIBRATE = ord('c')
+KEY_RESET_SEGMENT = ord('r')

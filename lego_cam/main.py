@@ -8,6 +8,11 @@ import queue
 import logging
 import sys
 import sqlite3
+import os
+import time
+import re
+from datetime import datetime
+from pathlib import Path
 import cv2
 import numpy as np
 
@@ -28,10 +33,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def sanitize_filename(text: str) -> str:
+    """
+    Sanitize a string for use in filenames.
+
+    Args:
+        text: String to sanitize
+
+    Returns:
+        Sanitized string safe for filenames
+    """
+    # Replace spaces with underscores and remove special characters
+    text = re.sub(r'[^\w\s-]', '', text)
+    text = re.sub(r'[-\s]+', '_', text)
+    return text.strip('_')
+
+
 def draw_hud(
     frame: np.ndarray,
     session_id: int,
     session_tag: str | None,
+    segment_index: int,
     detection_count: int,
     paused: bool = False,
 ) -> np.ndarray:
@@ -42,6 +64,7 @@ def draw_hud(
         frame: Input frame to draw on
         session_id: Current session ID
         session_tag: Session tag or None
+        segment_index: Current segment index
         detection_count: Number of detections in current frame
         paused: Whether the system is paused
 
@@ -83,13 +106,27 @@ def draw_hud(
         cv2.LINE_AA,
     )
 
-    # Line 3: Detection count
+    # Line 3: Segment info
+    segment_text = f"Segment: {segment_index}"
+
+    cv2.putText(
+        frame,
+        segment_text,
+        (x, y + line_height * 2),
+        config.HUD_FONT,
+        config.HUD_FONT_SCALE,
+        config.HUD_COLOR,
+        config.HUD_THICKNESS,
+        cv2.LINE_AA,
+    )
+
+    # Line 4: Detection count
     detection_text = f"Last detections: {detection_count}"
 
     cv2.putText(
         frame,
         detection_text,
-        (x, y + line_height * 2),
+        (x, y + line_height * 3),
         config.HUD_FONT,
         config.HUD_FONT_SCALE,
         config.HUD_COLOR,
@@ -100,9 +137,141 @@ def draw_hud(
     return frame
 
 
+def draw_message(frame: np.ndarray, message: str) -> np.ndarray:
+    """
+    Draw a temporary message overlay on the frame.
+
+    Args:
+        frame: Input frame
+        message: Message text to display
+
+    Returns:
+        Frame with message drawn
+    """
+    x, y = config.MESSAGE_POSITION
+
+    cv2.putText(
+        frame,
+        message,
+        (x, y),
+        config.HUD_FONT,
+        config.MESSAGE_FONT_SCALE,
+        config.MESSAGE_COLOR,
+        config.HUD_THICKNESS,
+        cv2.LINE_AA,
+    )
+
+    return frame
+
+
+def draw_quit_confirmation(frame: np.ndarray) -> np.ndarray:
+    """
+    Draw quit confirmation overlay on the frame.
+
+    Args:
+        frame: Input frame
+
+    Returns:
+        Frame with quit confirmation drawn
+    """
+    # Get frame dimensions
+    height, width = frame.shape[:2]
+
+    # Draw semi-transparent background rectangle
+    overlay = frame.copy()
+    rect_x = width // 2 - 200
+    rect_y = height // 2 - 40
+    rect_w = 400
+    rect_h = 80
+
+    cv2.rectangle(
+        overlay,
+        (rect_x, rect_y),
+        (rect_x + rect_w, rect_y + rect_h),
+        config.QUIT_CONFIRM_BG_COLOR,
+        -1,
+    )
+
+    # Blend overlay with original frame
+    alpha = 0.7
+    frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+
+    # Draw text
+    text1 = "Press Q again to quit"
+    text2 = "Any other key to cancel"
+
+    text_x = rect_x + 40
+    text_y = rect_y + 35
+
+    cv2.putText(
+        frame,
+        text1,
+        (text_x, text_y),
+        config.HUD_FONT,
+        config.MESSAGE_FONT_SCALE,
+        config.QUIT_CONFIRM_COLOR,
+        config.HUD_THICKNESS,
+        cv2.LINE_AA,
+    )
+
+    cv2.putText(
+        frame,
+        text2,
+        (text_x, text_y + 30),
+        config.HUD_FONT,
+        config.MESSAGE_FONT_SCALE - 0.1,
+        config.QUIT_CONFIRM_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+
+    return frame
+
+
+def save_snapshot(
+    frame: np.ndarray,
+    session_id: int,
+    session_tag: str | None,
+) -> str:
+    """
+    Save a snapshot of the current frame to disk.
+
+    Args:
+        frame: Frame to save (including annotations and HUD)
+        session_id: Current session ID
+        session_tag: Session tag or None
+
+    Returns:
+        Path to saved snapshot
+    """
+    # Create snapshots directory if it doesn't exist
+    snapshots_dir = Path(config.SNAPSHOTS_DIR)
+    snapshots_dir.mkdir(exist_ok=True)
+
+    # Build filename
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    session_part = f"session_{session_id}"
+
+    if session_tag:
+        tag_part = sanitize_filename(session_tag)
+        filename = f"{session_part}_{tag_part}_{timestamp}.png"
+    else:
+        filename = f"{session_part}_{timestamp}.png"
+
+    filepath = snapshots_dir / filename
+
+    # Save frame
+    cv2.imwrite(str(filepath), frame)
+    logger.info(f"Snapshot saved: {filepath}")
+
+    return str(filepath)
+
+
 def ui_loop(
     stop_event: threading.Event,
     ui_queue: queue.Queue,
+    db_queue: queue.Queue,
+    detector: HeuristicDetector,
     session_id: int,
     session_tag: str | None,
 ) -> None:
@@ -113,12 +282,14 @@ def ui_loop(
     - Reads (frame, detections) from ui_queue
     - Maintains last frame for display
     - Draws detection boxes and HUD
-    - Handles keyboard input (q to quit, p to pause)
+    - Handles keyboard input (q/p/s/c/r)
     - Shows the frame via cv2.imshow
 
     Args:
         stop_event: Event to signal shutdown to other threads
         ui_queue: Queue to receive (frame, detections) tuples
+        db_queue: Queue to send DB jobs
+        detector: Detector instance for calibration
         session_id: Current session ID
         session_tag: Session tag or None
     """
@@ -128,9 +299,19 @@ def ui_loop(
     cv2.namedWindow(config.WINDOW_NAME, cv2.WINDOW_NORMAL)
 
     # State
-    last_frame = None
+    last_raw_frame = None  # Raw frame without annotations
+    last_frame = None  # Frame with annotations
     last_detections = []
     paused = False
+    segment_index = 1
+
+    # Message system
+    message = None
+    message_expire_time = 0
+
+    # Quit confirmation
+    quit_pending = False
+    quit_expire_time = 0
 
     try:
         while not stop_event.is_set():
@@ -138,6 +319,7 @@ def ui_loop(
             if not paused:
                 try:
                     frame, detections = ui_queue.get(timeout=config.QUEUE_GET_TIMEOUT)
+                    last_raw_frame = frame.copy()  # Store raw frame for calibration
                     last_frame = frame.copy()
                     last_detections = detections
 
@@ -157,22 +339,88 @@ def ui_loop(
                     display_frame,
                     session_id,
                     session_tag,
+                    segment_index,
                     len(last_detections),
                     paused=paused,
                 )
+
+                # Draw temporary message if active
+                if message and time.time() < message_expire_time:
+                    display_frame = draw_message(display_frame, message)
+                elif message and time.time() >= message_expire_time:
+                    message = None
+
+                # Draw quit confirmation if pending
+                if quit_pending:
+                    display_frame = draw_quit_confirmation(display_frame)
+
+                    # Check if quit timeout expired
+                    if time.time() >= quit_expire_time:
+                        quit_pending = False
+                        logger.info("Quit cancelled (timeout)")
 
                 cv2.imshow(config.WINDOW_NAME, display_frame)
 
             # Handle keyboard input
             key = cv2.waitKey(1) & 0xFF
 
+            if key == 255:  # No key pressed
+                continue
+
+            # Handle quit with confirmation
             if key == config.KEY_QUIT:
-                logger.info("Quit key pressed, initiating shutdown")
-                stop_event.set()
-                break
+                if quit_pending:
+                    # Second 'q' press - actually quit
+                    logger.info("Quit confirmed, initiating shutdown")
+                    stop_event.set()
+                    break
+                else:
+                    # First 'q' press - enter pending state
+                    quit_pending = True
+                    quit_expire_time = time.time() + config.QUIT_CONFIRM_TIMEOUT
+                    logger.info("Quit pending, press Q again to confirm")
+
+            elif quit_pending:
+                # Any other key cancels quit
+                quit_pending = False
+                logger.info("Quit cancelled")
+
             elif key == config.KEY_PAUSE:
                 paused = not paused
                 logger.info(f"Pause toggled: {'PAUSED' if paused else 'RUNNING'}")
+
+            elif key == config.KEY_SNAPSHOT:
+                # Save snapshot
+                if last_frame is not None:
+                    filepath = save_snapshot(display_frame, session_id, session_tag)
+                    message = f"Snapshot saved: {Path(filepath).name}"
+                    message_expire_time = time.time() + config.MESSAGE_DURATION
+                    logger.info(f"Snapshot saved to {filepath}")
+
+            elif key == config.KEY_CALIBRATE:
+                # Calibrate detector with current raw frame
+                if last_raw_frame is not None:
+                    detector.calibrate_from_frame(last_raw_frame)
+                    message = "Calibrated"
+                    message_expire_time = time.time() + config.MESSAGE_DURATION
+                    logger.info("Detector calibrated")
+
+            elif key == config.KEY_RESET_SEGMENT:
+                # Increment segment and log marker to DB
+                segment_index += 1
+                timestamp = time.time()
+
+                # Enqueue segment marker job
+                db_queue.put({
+                    "type": "segment_marker",
+                    "session_id": session_id,
+                    "segment_index": segment_index,
+                    "timestamp": timestamp,
+                })
+
+                message = f"Segment {segment_index}"
+                message_expire_time = time.time() + config.MESSAGE_DURATION
+                logger.info(f"Segment marker {segment_index} created")
 
     finally:
         cv2.destroyAllWindows()
@@ -215,8 +463,11 @@ def main() -> int:
     logger.info(f"Resolution: {config.RESOLUTION}")
     logger.info(f"Target FPS: {config.TARGET_FPS}")
     logger.info("Controls:")
-    logger.info("  'q' - Quit")
+    logger.info("  'q' - Quit (press twice to confirm)")
     logger.info("  'p' - Pause/Unpause")
+    logger.info("  's' - Save snapshot")
+    logger.info("  'c' - Calibrate background")
+    logger.info("  'r' - Start new segment")
     logger.info("=" * 60)
 
     # Create shared stop event
@@ -246,7 +497,7 @@ def main() -> int:
 
     # Run UI loop in main thread (required by OpenCV)
     try:
-        ui_loop(stop_event, ui_queue, session_id, session_tag)
+        ui_loop(stop_event, ui_queue, db_queue, detector, session_id, session_tag)
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
         stop_event.set()

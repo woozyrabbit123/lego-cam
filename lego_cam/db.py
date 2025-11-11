@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS detections (
     confidence REAL NOT NULL,
     FOREIGN KEY(frame_id) REFERENCES frames(id)
 );
+
+CREATE TABLE IF NOT EXISTS segment_markers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    segment_index INTEGER NOT NULL,
+    timestamp REAL NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id)
+);
 """
 
 
@@ -162,6 +170,33 @@ def insert_frame_with_detections(
     return frame_id
 
 
+def insert_segment_marker(
+    conn: sqlite3.Connection,
+    session_id: int,
+    segment_index: int,
+    timestamp: float,
+) -> int:
+    """
+    Insert a segment marker to logically separate segments within a session.
+
+    Args:
+        conn: Database connection
+        session_id: Session this marker belongs to
+        segment_index: Segment index (1, 2, 3, ...)
+        timestamp: Marker timestamp (unix time)
+
+    Returns:
+        The marker ID
+    """
+    cursor = conn.execute(
+        "INSERT INTO segment_markers (session_id, segment_index, timestamp) VALUES (?, ?, ?)",
+        (session_id, segment_index, timestamp)
+    )
+    marker_id = cursor.lastrowid
+    logger.info(f"Segment marker {segment_index} inserted for session {session_id}")
+    return marker_id
+
+
 class DBWorker:
     """
     Database worker that processes jobs from a queue with batching.
@@ -268,6 +303,15 @@ class DBWorker:
                 elif job_type == "end_session":
                     # End session
                     end_session(self.conn, job["session_id"])
+
+                elif job_type == "segment_marker":
+                    # Insert segment marker
+                    insert_segment_marker(
+                        self.conn,
+                        job["session_id"],
+                        job["segment_index"],
+                        job["timestamp"],
+                    )
 
                 else:
                     logger.warning(f"Unknown job type: {job_type}")
