@@ -304,8 +304,9 @@ class DBWorker:
         """
         Main worker loop: consume jobs, batch them, and commit periodically.
 
-        Loop continues until a "shutdown" job is received. This ensures all
-        jobs (including "end_session") are processed before the worker exits.
+        Loop continues until a "shutdown" job is received AND the queue is drained.
+        This ensures all jobs (including those enqueued shortly after shutdown)
+        are processed before the worker exits.
         """
         logger.info("DB worker started")
 
@@ -316,24 +317,30 @@ class DBWorker:
 
             pending_jobs = []
             last_commit_time = time.time()
-            shutdown_requested = False
+            shutdown_received = False
 
-            while not shutdown_requested:
+            while True:
                 try:
                     # Try to get a job with timeout
                     job = self.db_queue.get(timeout=0.1)
 
                     # Check for shutdown sentinel
                     if job.get("type") == "shutdown":
-                        logger.info("Shutdown job received")
-                        shutdown_requested = True
-                        # Don't add shutdown job to pending_jobs
+                        logger.info("Shutdown job received, will drain queue before exiting")
+                        shutdown_received = True
                         self.db_queue.task_done()
-                        break
+                        # Don't break yet - continue draining queue
+                        continue
 
                     pending_jobs.append(job)
                     self.db_queue.task_done()
+
                 except queue.Empty:
+                    # If shutdown received and queue is empty, we can exit
+                    if shutdown_received:
+                        logger.info("Queue drained, exiting DB worker")
+                        break
+                    # Otherwise continue waiting for jobs
                     pass
 
                 # Check if we should commit
