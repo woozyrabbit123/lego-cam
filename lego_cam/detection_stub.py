@@ -1,6 +1,6 @@
 """
-Stub detector for Lego Cam.
-This will be replaced with heuristic and YOLO-based detectors later.
+Detector interface for Lego Cam.
+Defines the Protocol that all detectors must implement.
 """
 
 from typing import Protocol
@@ -8,7 +8,11 @@ import numpy as np
 
 
 class Detector(Protocol):
-    """Protocol/interface for detectors."""
+    """
+    Protocol/interface for all detectors.
+
+    All detector implementations (heuristic, YOLO, etc.) must implement these methods.
+    """
 
     def detect(self, frame: np.ndarray) -> list[dict]:
         """
@@ -19,10 +23,25 @@ class Detector(Protocol):
 
         Returns:
             List of detection dictionaries. Each detection should have:
-            - 'bbox': (x, y, w, h) bounding box
-            - 'confidence': float confidence score
-            - 'class': str class name
-            - Any other metadata needed
+            - 'label': str object type/class name
+            - 'color': str color name (may be "unknown" for some detectors)
+            - 'x_min': float normalized x coordinate (0..1)
+            - 'y_min': float normalized y coordinate (0..1)
+            - 'x_max': float normalized x coordinate (0..1)
+            - 'y_max': float normalized y coordinate (0..1)
+            - 'confidence': float confidence score (0..1)
+        """
+        ...
+
+    def calibrate_from_frame(self, frame: np.ndarray) -> None:
+        """
+        Calibrate the detector using the current frame.
+
+        This may capture a background reference or adjust detector parameters.
+        Some detectors (e.g., YOLO) may implement this as a no-op.
+
+        Args:
+            frame: BGR image from OpenCV to use for calibration
         """
         ...
 
@@ -47,10 +66,8 @@ class StubDetector:
         Returns:
             Empty list (no detections)
         """
-        # In the future, this will:
-        # 1. Run heuristic detection (color-based, etc.)
-        # 2. Run YOLO detection
-        # 3. Merge and filter results
-        # 4. Return list of detection dicts
-
         return []
+
+    def calibrate_from_frame(self, frame: np.ndarray) -> None:
+        """No-op calibration for stub detector."""
+        pass

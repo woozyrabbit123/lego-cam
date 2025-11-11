@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lego-cam"
-version = "0.1.0"
-description = "A threaded computer vision pipeline for LEGO detection"
+version = "1.0.0"
+description = "A threaded computer vision pipeline for LEGO detection with GPU-accelerated YOLO"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -16,6 +16,8 @@ authors = [
 dependencies = [
     "opencv-python>=4.8.0",
     "numpy>=1.24.0",
+    "ultralytics>=8.0.0",
+    "torch>=2.0.0",
 ]
 
 [project.optional-dependencies]

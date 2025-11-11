@@ -2,6 +2,8 @@
 Configuration constants for Lego Cam.
 """
 
+from enum import Enum
+
 # Video capture settings
 RESOLUTION = (640, 480)  # Width x Height
 TARGET_FPS = 15
@@ -19,9 +21,23 @@ CAPTURE_QUEUE_SIZE = 1
 UI_QUEUE_SIZE = 1
 DB_QUEUE_SIZE = 0  # 0 means unbounded
 
-# Detection settings
+# Detection mode settings
+class DetectionMode(str, Enum):
+    """Detection mode configuration."""
+    FAST = "fast"      # Heuristic only (CPU)
+    SMART = "smart"    # YOLO only (GPU, fail if unavailable)
+    AUTO = "auto"      # YOLO with automatic fallback to heuristic
+
+DEFAULT_DETECTION_MODE = DetectionMode.FAST
+
+# Heuristic detection settings
 MIN_CONTOUR_AREA = 100  # Minimum contour area in pixels for heuristic detector
 HEURISTIC_CONFIDENCE = 0.6  # Confidence score for heuristic detections
+
+# YOLO detection settings
+YOLO_WEIGHTS_PATH = "yolov8n.pt"  # Path to YOLOv8n weights
+YOLO_DEVICE = "cuda:0"  # Device for YOLO inference ("cuda:0" or "cpu")
+YOLO_CONF_THRESHOLD = 0.25  # Minimum confidence threshold for YOLO detections
 
 # UI settings
 WINDOW_NAME = "Lego Cam v0"

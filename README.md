@@ -1,37 +1,75 @@
 # Lego Cam
 
-Local-first Lego detection and logging app. Real-time webcam viewer that detects Lego bricks and minifig parts, draws boxes, and logs data to SQLite for analysis. Built in phases (v0–v3) with OpenCV, YOLO, and smart automation.
+Local-first Lego detection and logging app. Real-time webcam viewer that detects Lego bricks and minifig parts, draws boxes, and logs data to SQLite for analysis. Built with OpenCV, YOLOv8, and smart GPU/CPU fallback.
 
-## Current Status: v0 - Foundation Pipeline
+## Current Status: v1 - GPU-Accelerated Detection
 
-This initial version establishes the core threaded pipeline architecture without actual detection logic. It provides:
+This version adds real detection capabilities with three modes:
 
-- **Threaded Pipeline**: Capture → Detection → UI with proper queue management
-- **640x480 Webcam**: Real-time video capture at configured resolution
-- **Clean Architecture**: Modular design ready for heuristic and YOLO detectors
-- **Basic Controls**: Keyboard hotkeys for quit and pause
-- **Stub Components**: DB thread and detector interface ready for expansion
+- **FAST Mode**: HSV color-based heuristic detection (CPU only, always available)
+- **SMART Mode**: YOLOv8n GPU detection (fails gracefully if GPU unavailable)
+- **AUTO Mode**: YOLOv8n with automatic fallback to heuristic (recommended)
 
-## Features
+### Key Features
+- ✅ **Multiple Detection Backends**: Choose between heuristic (CPU) and YOLO (GPU)
+- ✅ **Automatic Fallback**: AUTO mode seamlessly switches to heuristic if GPU fails
+- ✅ **Real-time Detection**: Bounding boxes with color-coded labels
+- ✅ **SQLite Logging**: Sessions, frames, detections, and segment markers
+- ✅ **Rich HUD**: Shows mode, backend, session, segment, and detection count
+- ✅ **Advanced Controls**: Snapshots, calibration, segments, quit confirmation
+- ✅ **Threaded Pipeline**: Capture → Detection → UI with proper queue management
 
-### Current (v0)
-- ✅ Webcam capture at 640x480 resolution
-- ✅ Threaded pipeline with queue-based communication
-- ✅ Real-time video display with HUD overlay
-- ✅ Hotkey controls ('q' to quit, 'p' to pause)
-- ✅ Stub detector interface
-- ✅ Stub database thread
-- ✅ Clean shutdown handling
+## Detection Modes
 
-### Planned (v1+)
-- 🔜 Heuristic color-based detection
-- 🔜 YOLO-based object detection
-- 🔜 SQLite session and detection logging
-- 🔜 Rich HUD with FPS, detection counts, session info
-- 🔜 Additional hotkeys: S (session), C (clear), R (record), X/B (export)
-- 🔜 Bounding box visualization
-- 🔜 Detection confidence filtering
-- 🔜 Data export functionality
+### FAST Mode (CPU Only)
+```bash
+python -m lego_cam --mode fast
+```
+- Uses HSV color filtering and contour detection
+- Always available (no GPU required)
+- Detects 5 colors: red, blue, yellow, green, white
+- Best for: Testing, low-end hardware, CPU-only environments
+
+### SMART Mode (GPU Required)
+```bash
+python -m lego_cam --mode smart
+```
+- Uses YOLOv8n with GPU acceleration
+- Fails hard if GPU/CUDA unavailable (app won't start)
+- Higher accuracy for general object detection
+- Best for: Production use with guaranteed GPU availability
+
+### AUTO Mode (Recommended)
+```bash
+python -m lego_cam --mode auto
+```
+- Attempts YOLOv8n on GPU first
+- Automatically falls back to heuristic if GPU fails
+- Runtime fallback if YOLO errors occur
+- Best for: Development, mixed environments, maximum reliability
+
+## Features by Version
+
+### v1 (Current)
+- ✅ YOLOv8n GPU detection
+- ✅ HSV heuristic detection
+- ✅ Three detection modes (FAST/SMART/AUTO)
+- ✅ Automatic fallback in AUTO mode
+- ✅ CLI argument parsing (--mode)
+- ✅ SQLite session and detection logging
+- ✅ Segment markers for logical grouping
+- ✅ Snapshot saving
+- ✅ Background calibration
+- ✅ Quit confirmation
+- ✅ Enhanced HUD with mode/backend display
+
+### Planned (v2+)
+- 🔜 YOLO + Heuristic fusion (run both, merge results)
+- 🔜 Custom YOLO training for LEGO-specific classes
+- 🔜 Per-brick identification and tracking
+- 🔜 Data export to CSV/JSON
+- 🔜 FPS counter in HUD
+- 🔜 Configurable HSV color ranges
 
 ## Architecture
 
@@ -54,7 +92,7 @@ This initial version establishes the core threaded pipeline architecture without
                                             └─────────────────┘
 
 ┌─────────────────┐     db_queue
-│   DB Thread     │◀────(unbounded)────── (future: detection events)
+│   DB Thread     │◀────(unbounded)────── (from detection thread)
 └─────────────────┘
 ```
 
@@ -62,16 +100,19 @@ This initial version establishes the core threaded pipeline architecture without
 
 ```
 lego-cam/
-├── pyproject.toml          # Project metadata and dependencies
-├── requirements.txt        # Alternative pip requirements
-├── README.md              # This file
-└── lego_cam/              # Main package
-    ├── __init__.py        # Package initialization
-    ├── config.py          # Global constants and configuration
-    ├── main.py            # Entry point and UI loop
-    ├── pipeline.py        # Capture and detection thread functions
-    ├── detection_stub.py  # Detector interface (stub)
-    └── db_stub.py         # Database thread (stub)
+├── pyproject.toml            # Project metadata and dependencies
+├── requirements.txt          # Alternative pip requirements
+├── README.md                # This file
+├── lego_cam.db              # SQLite database (created on first run)
+└── lego_cam/                # Main package
+    ├── __init__.py          # Package initialization
+    ├── config.py            # Global constants and configuration
+    ├── main.py              # Entry point, UI loop, and CLI
+    ├── pipeline.py          # Capture and detection thread functions
+    ├── detection_stub.py    # Detector protocol interface
+    ├── detection_heuristic.py # HSV color-based detector
+    ├── detection_yolo.py    # YOLOv8n GPU detector
+    └── db.py                # Database thread and SQLite operations
 ```
 
 ## Installation
@@ -80,6 +121,8 @@ lego-cam/
 - Python 3.11 or higher
 - Webcam connected to your system
 - Linux, macOS, or Windows
+- **For SMART/AUTO modes:** NVIDIA GPU with CUDA support (optional for FAST mode)
+- **For SMART/AUTO modes:** YOLOv8n weights (auto-downloaded on first run)
 
 ### Steps
 
@@ -110,44 +153,65 @@ lego-cam/
 
 ### Running the Application
 
-**Method 1: As a Python module**
+**Choose a detection mode:**
+
 ```bash
+# FAST mode (CPU only, always available)
+python -m lego_cam --mode fast
+
+# SMART mode (GPU required, fails if unavailable)
+python -m lego_cam --mode smart
+
+# AUTO mode (GPU with fallback, recommended)
+python -m lego_cam --mode auto
+
+# Default mode (currently FAST)
 python -m lego_cam
 ```
 
-**Method 2: Using the installed command** (if installed with `pip install .`)
+**Using installed command:**
 ```bash
-lego-cam
+lego-cam --mode auto
 ```
 
 ### Controls
 
 Once the application is running:
 
-- **`q`** - Quit the application and shutdown cleanly
+- **`q`** - Quit (press twice to confirm)
 - **`p`** - Pause/unpause the display (freezes UI but threads continue running)
+- **`s`** - Save snapshot to `snapshots/` folder
+- **`c`** - Calibrate background (for heuristic detector)
+- **`r`** - Start new segment (creates logical boundary in database)
 
 ### Expected Output
 
-On startup, you should see:
+On startup, you'll see:
 ```
 ============================================================
-Lego Cam v0 - Foundation Pipeline
+Lego Cam v1 - Mode: FAST
 ============================================================
-Resolution: (640, 480)
-Target FPS: 15
-Controls:
-  'q' - Quit
-  'p' - Pause/Unpause
+Detection backend: heuristic
+...
+Session Setup
 ============================================================
+Session tag (optional, e.g. 'BOX: green tub'):
+```
+
+The HUD displays:
+```
+Lego Cam v1  [FAST / HEURISTIC]     (or [AUTO / YOLO], etc.)
+Session: 1 (my session tag)
+Segment: 1
+Last detections: 5
 ```
 
 The application will:
-1. Open your default webcam
-2. Display a window titled "Lego Cam v0"
-3. Show real-time video with "Lego Cam v0" text overlay
-4. Run detection pipeline (currently no-op)
-5. Log thread activity to console
+1. Open your default webcam at 640x480
+2. Run detection based on selected mode
+3. Draw colored bounding boxes around detected objects
+4. Log all frames and detections to SQLite database
+5. Display real-time HUD with mode, session, and detection info
 
 ### Troubleshooting
 
@@ -164,6 +228,13 @@ The application will:
 **Import errors:**
 - Verify all dependencies are installed: `pip list | grep opencv`
 - Try reinstalling: `pip install --force-reinstall opencv-python numpy`
+
+**GPU/CUDA issues (SMART/AUTO modes):**
+- **SMART mode won't start**: Verify CUDA is installed and accessible: `nvidia-smi`
+- **AUTO mode falls back to heuristic**: Check PyTorch CUDA: `python -c "import torch; print(torch.cuda.is_available())"`
+- **YOLOv8n download fails**: Ensure internet connectivity; weights are auto-downloaded on first run
+- **Out of memory errors**: Reduce resolution in `config.py` or use FAST mode
+- **HUD shows "BROKEN"**: YOLO encountered runtime error in SMART mode; restart app or use AUTO/FAST
 
 ## Development
 
@@ -191,39 +262,25 @@ logging.basicConfig(level=logging.DEBUG)  # For verbose output
 
 Edit `lego_cam/config.py` to customize:
 
+**Video Capture:**
 - **RESOLUTION**: Camera resolution (default: 640x480)
 - **TARGET_FPS**: Desired frame rate (default: 15)
 - **CAMERA_INDEX**: Which camera to use (default: 0)
+
+**Detection:**
+- **DEFAULT_DETECTION_MODE**: Default mode if --mode not specified (default: FAST)
+- **YOLO_WEIGHTS_PATH**: Path to YOLO weights (default: yolov8n.pt)
+- **YOLO_DEVICE**: GPU device for YOLO (default: cuda:0)
+- **YOLO_CONF_THRESHOLD**: Minimum confidence for YOLO detections (default: 0.25)
+- **MIN_CONTOUR_AREA**: Minimum area for heuristic detections (default: 100px)
+- **HEURISTIC_CONFIDENCE**: Confidence score for heuristic (default: 0.6)
+
+**UI & Database:**
+- **DB_PATH**: SQLite database location (default: lego_cam.db)
+- **DB_BATCH_SIZE**: Detections per batch (default: 50)
+- **HUD appearance**: Text, color, position, font
 - **Queue sizes**: Pipeline queue capacities
-- **HUD appearance**: Text, color, position
 - **Timeouts**: Thread join and queue operation timeouts
-
-## Next Steps (v1 and beyond)
-
-### Phase 1: Heuristic Detection
-- Implement color-based LEGO detection
-- Add HSV color filtering
-- Simple shape detection for bricks
-- Draw bounding boxes on detected objects
-
-### Phase 2: YOLO Integration
-- Integrate pre-trained or custom YOLO model
-- Implement dual detection (heuristic + YOLO)
-- Merge and filter detection results
-- Confidence thresholding
-
-### Phase 3: Database & Sessions
-- SQLite schema for sessions and detections
-- Session management (start/stop/resume)
-- Detection event logging
-- Historical data queries
-
-### Phase 4: Rich Features
-- Enhanced HUD with live statistics
-- Hotkeys: S (session), C (clear), R (record), X/B (export)
-- Data export to CSV/JSON
-- Performance metrics and profiling
-- Configuration via CLI arguments
 
 ## License
 
@@ -236,6 +293,8 @@ This is currently a personal/educational project. Feedback and suggestions welco
 ## Acknowledgments
 
 Built with:
-- OpenCV for video processing
-- NumPy for array operations
+- [OpenCV](https://opencv.org/) for video processing
+- [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics) for GPU-accelerated object detection
+- [PyTorch](https://pytorch.org/) for deep learning inference
+- [NumPy](https://numpy.org/) for array operations
 - Python threading for concurrency
