@@ -763,36 +763,45 @@ def main() -> int:
         logger.error(f"Error in UI loop: {e}", exc_info=True)
         stop_event.set()
 
-    # Shutdown: end session in DB
+    # Shutdown: stop producers first, then send DB shutdown signal
     logger.info("Shutting down...")
-    logger.info("Ending session in database...")
 
-    # Enqueue end_session job first
+    # Step 1: Join capture thread (stops producing frames)
+    logger.info("Waiting for Capture thread...")
+    capture_thread.join(timeout=config.THREAD_JOIN_TIMEOUT)
+    if capture_thread.is_alive():
+        logger.warning("Capture thread did not stop cleanly")
+    else:
+        logger.info("Capture thread stopped")
+
+    # Step 2: Join detection thread (stops producing DB jobs)
+    logger.info("Waiting for Detection thread...")
+    detection_thread.join(timeout=config.THREAD_JOIN_TIMEOUT)
+    if detection_thread.is_alive():
+        logger.warning("Detection thread did not stop cleanly")
+    else:
+        logger.info("Detection thread stopped")
+
+    # Step 3: Now that producers are stopped, enqueue end_session job
+    logger.info("Ending session in database...")
     db_queue.put({
         "type": "end_session",
         "session_id": session_id,
     })
 
-    # Then enqueue shutdown sentinel to tell DB worker to exit
-    # This guarantees end_session is processed before worker stops
+    # Step 4: Enqueue shutdown sentinel to tell DB worker to exit
+    # Because detection thread is stopped, no more jobs can be enqueued after this
     db_queue.put({
         "type": "shutdown",
     })
 
-    # Wait for threads to finish
-    threads = [
-        ("Capture", capture_thread),
-        ("Detection", detection_thread),
-        ("DB", db_thread),
-    ]
-
-    for name, thread in threads:
-        logger.info(f"Waiting for {name} thread...")
-        thread.join(timeout=config.THREAD_JOIN_TIMEOUT)
-        if thread.is_alive():
-            logger.warning(f"{name} thread did not stop cleanly")
-        else:
-            logger.info(f"{name} thread stopped")
+    # Step 5: Wait for DB thread to drain queue and exit
+    logger.info("Waiting for DB thread...")
+    db_thread.join(timeout=config.THREAD_JOIN_TIMEOUT)
+    if db_thread.is_alive():
+        logger.warning("DB thread did not stop cleanly")
+    else:
+        logger.info("DB thread stopped")
 
     # Print session summary
     print_session_summary(session_id, session_tag)
