@@ -107,24 +107,29 @@ def detection_thread_fn(
     stop_event: threading.Event,
     capture_queue: queue.Queue,
     ui_queue: queue.Queue,
+    db_queue: queue.Queue,
     detector: Detector,
+    session_id: int,
 ) -> None:
     """
-    Detection thread: reads frames from capture_queue, runs detection, pushes to ui_queue.
+    Detection thread: reads frames from capture_queue, runs detection, pushes to ui_queue and db_queue.
 
     This thread:
     - Reads frames from capture_queue
     - Runs detector.detect() on each frame
     - Puts (frame, detections) tuple into ui_queue
+    - Enqueues frame job to db_queue for logging
     - Handles queue overflow by overwriting old data
 
     Args:
         stop_event: Event to signal thread shutdown
         capture_queue: Queue to receive captured frames
         ui_queue: Queue to send (frame, detections) tuples
+        db_queue: Queue to send DB jobs
         detector: Detector instance to run on frames
+        session_id: Current session ID for DB logging
     """
-    logger.info("Detection thread started")
+    logger.info(f"Detection thread started (session_id={session_id})")
 
     detection_count = 0
     last_log_time = time.time()
@@ -138,10 +143,13 @@ def detection_thread_fn(
                 # No frame available, continue
                 continue
 
-            # Run detection (currently returns empty list)
+            # Record timestamp for this frame
+            timestamp = time.time()
+
+            # Run detection
             detections = detector.detect(frame)
 
-            # Prepare result tuple
+            # Prepare result tuple for UI
             result = (frame, detections)
 
             # Put result in UI queue, non-blocking
@@ -156,6 +164,18 @@ def detection_thread_fn(
                     pass
                 ui_queue.put_nowait(result)
 
+            # Enqueue frame job to DB (non-blocking, unbounded queue)
+            db_job = {
+                "type": "frame",
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "detections": detections,
+            }
+            try:
+                db_queue.put_nowait(db_job)
+            except queue.Full:
+                logger.warning("DB queue full, dropping frame data")
+
             detection_count += 1
 
             # Log detection rate periodically
@@ -163,7 +183,7 @@ def detection_thread_fn(
             if current_time - last_log_time >= 5.0:
                 elapsed = current_time - last_log_time
                 rate = detection_count / elapsed
-                logger.debug(f"Detection rate: {rate:.1f} fps")
+                logger.debug(f"Detection rate: {rate:.1f} fps, {len(detections)} detections in last frame")
                 detection_count = 0
                 last_log_time = current_time
 
@@ -199,7 +219,9 @@ def start_detection_thread(
     stop_event: threading.Event,
     capture_queue: queue.Queue,
     ui_queue: queue.Queue,
+    db_queue: queue.Queue,
     detector: Detector,
+    session_id: int,
 ) -> threading.Thread:
     """
     Start the detection thread.
@@ -208,14 +230,16 @@ def start_detection_thread(
         stop_event: Event to signal thread shutdown
         capture_queue: Queue to receive captured frames
         ui_queue: Queue to send detection results
+        db_queue: Queue to send DB jobs
         detector: Detector instance to use
+        session_id: Current session ID for DB logging
 
     Returns:
         The started thread object
     """
     thread = threading.Thread(
         target=detection_thread_fn,
-        args=(stop_event, capture_queue, ui_queue, detector),
+        args=(stop_event, capture_queue, ui_queue, db_queue, detector, session_id),
         name="DetectionThread",
         daemon=True,
     )
