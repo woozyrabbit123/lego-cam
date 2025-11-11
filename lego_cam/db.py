@@ -49,6 +49,23 @@ CREATE TABLE IF NOT EXISTS segment_markers (
     timestamp REAL NOT NULL,
     FOREIGN KEY(session_id) REFERENCES sessions(id)
 );
+
+CREATE TABLE IF NOT EXISTS scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    timestamp REAL NOT NULL,
+    summary_json TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS bookmarks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    frame_timestamp REAL NOT NULL,
+    image_path TEXT NOT NULL,
+    note TEXT,
+    FOREIGN KEY(session_id) REFERENCES sessions(id)
+);
 """
 
 
@@ -197,6 +214,62 @@ def insert_segment_marker(
     return marker_id
 
 
+def insert_scan_summary(
+    conn: sqlite3.Connection,
+    session_id: int,
+    timestamp: float,
+    summary_json: str,
+) -> int:
+    """
+    Insert a scan summary to the scans table.
+
+    Args:
+        conn: Database connection
+        session_id: Session this scan belongs to
+        timestamp: Scan timestamp (unix time)
+        summary_json: JSON-encoded scan summary
+
+    Returns:
+        The scan ID
+    """
+    cursor = conn.execute(
+        "INSERT INTO scans (session_id, timestamp, summary_json) VALUES (?, ?, ?)",
+        (session_id, timestamp, summary_json)
+    )
+    scan_id = cursor.lastrowid
+    logger.info(f"Scan summary inserted for session {session_id}")
+    return scan_id
+
+
+def insert_bookmark(
+    conn: sqlite3.Connection,
+    session_id: int,
+    frame_timestamp: float,
+    image_path: str,
+    note: str | None = None,
+) -> int:
+    """
+    Insert a bookmark to the bookmarks table.
+
+    Args:
+        conn: Database connection
+        session_id: Session this bookmark belongs to
+        frame_timestamp: Timestamp of the bookmarked frame (unix time)
+        image_path: Path to saved bookmark image
+        note: Optional note/description
+
+    Returns:
+        The bookmark ID
+    """
+    cursor = conn.execute(
+        "INSERT INTO bookmarks (session_id, frame_timestamp, image_path, note) VALUES (?, ?, ?, ?)",
+        (session_id, frame_timestamp, image_path, note)
+    )
+    bookmark_id = cursor.lastrowid
+    logger.info(f"Bookmark inserted for session {session_id}")
+    return bookmark_id
+
+
 class DBWorker:
     """
     Database worker that processes jobs from a queue with batching.
@@ -324,6 +397,25 @@ class DBWorker:
                         job["session_id"],
                         job["segment_index"],
                         job["timestamp"],
+                    )
+
+                elif job_type == "scan_summary":
+                    # Insert scan summary
+                    insert_scan_summary(
+                        self.conn,
+                        job["session_id"],
+                        job["timestamp"],
+                        job["summary_json"],
+                    )
+
+                elif job_type == "bookmark":
+                    # Insert bookmark
+                    insert_bookmark(
+                        self.conn,
+                        job["session_id"],
+                        job["frame_timestamp"],
+                        job["image_path"],
+                        job.get("note"),
                     )
 
                 else:

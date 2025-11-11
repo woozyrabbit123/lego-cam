@@ -183,6 +183,8 @@ Once the application is running:
 - **`s`** - Save snapshot to `snapshots/` folder
 - **`c`** - Calibrate background (for heuristic detector)
 - **`r`** - Start new segment (creates logical boundary in database)
+- **`x`** - Run scan mode (dense detection with summary)
+- **`b`** - Bookmark current frame (saves frame + DB entry)
 
 ### Expected Output
 
@@ -202,7 +204,7 @@ The HUD displays:
 ```
 Lego Cam v1  [FAST / HEURISTIC]     (or [AUTO / YOLO], etc.)
 Session: 1 (my session tag)
-Segment: 1
+Segment: 1  |  N=3  |  Scene: ACTIVE
 Last detections: 5
 ```
 
@@ -211,7 +213,76 @@ The application will:
 2. Run detection based on selected mode
 3. Draw colored bounding boxes around detected objects
 4. Log all frames and detections to SQLite database
-5. Display real-time HUD with mode, session, and detection info
+5. Display real-time HUD with mode, session, detection interval, and scene state
+
+On exit, a session summary is printed:
+```
+============================================================
+SESSION SUMMARY
+============================================================
+Session: 1 (my session tag)
+Frames: 1234
+Detections: 567
+Segments: 3
+Scans: 2
+Bookmarks: 5
+Top detected labels:
+  person: 234
+  brick: 123
+  ...
+============================================================
+```
+
+## Smart Behavior
+
+Lego Cam v1 includes adaptive and intelligent features to optimize performance:
+
+### Adaptive Detection Interval (N)
+
+The system automatically adjusts how often detection runs (every Nth frame) based on detection time:
+
+- **Initial N**: Starts at 3 (runs detection every 3rd frame)
+- **Adaptation**: Every 5 seconds, N is adjusted based on measured detection time
+- **Range**: N varies between 1 (every frame) and 10 (every 10th frames)
+- **Goal**: Keep detection time under 50% of frame budget to maintain responsive UI
+- **Benefit**: Heavy detectors (YOLO on CPU) automatically skip more frames; fast detectors run more frequently
+
+The current N value is displayed in the HUD: `N=3`
+
+### Idle/Static Scene Detection
+
+When the scene stops changing, detection interval is boosted aggressively:
+
+- **Detection**: Compares consecutive frames (64x48 downsampled grayscale)
+- **Threshold**: Mean pixel difference < 8.0 on 0-255 scale
+- **Activation**: After 2 seconds (~30 frames) of static scene
+- **Effect**: Detection interval becomes N=30 when idle
+- **Recovery**: Returns to adaptive N immediately when motion detected
+
+Scene state is displayed in the HUD: `Scene: ACTIVE` or `Scene: IDLE`
+
+### Scan Mode ('x' hotkey)
+
+Press `x` to run a short dense detection scan:
+
+- **Duration**: 2 seconds of continuous detection (N=1)
+- **Collection**: All detections aggregated in-memory
+- **Summary**: Counts by label and color, stored in `scans` table
+- **Use case**: Quick inventory check or sample capture
+- **HUD indicator**: `[SCANNING]` appears during scan
+
+The scan summary is logged to the database with timestamp and JSON statistics.
+
+### Bookmarks ('b' hotkey)
+
+Press `b` to bookmark the current frame:
+
+- **Saves**: Annotated frame to `bookmarks/` directory
+- **Database**: Entry in `bookmarks` table with session_id, timestamp, and image path
+- **Filename**: `bookmark_session_X_tagY_segZ_TIMESTAMP.png`
+- **Use case**: Mark interesting frames for later review
+
+Both `scans` and `bookmarks` are counted in the session summary on exit.
 
 ### Troubleshooting
 
