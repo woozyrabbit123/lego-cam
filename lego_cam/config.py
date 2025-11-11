@@ -63,6 +63,27 @@ QUIT_CONFIRM_BG_COLOR = (0, 0, 128)  # Dark red background
 # Snapshot settings
 SNAPSHOTS_DIR = "snapshots"  # Directory for saved snapshots
 
+# Bookmark settings
+BOOKMARKS_DIR = "bookmarks"  # Directory for saved bookmarks
+
+# Adaptive detection interval settings
+INITIAL_DETECTION_INTERVAL = 3  # Initial N (run detection every N frames)
+MIN_DETECTION_INTERVAL = 1  # Minimum N
+MAX_DETECTION_INTERVAL = 10  # Maximum N
+DETECTION_TIME_SMOOTHING = 0.9  # EMA factor for smoothing detection time
+ADAPTATION_CHECK_SECONDS = 5.0  # How often to adapt N
+DETECTION_TIME_TARGET_FRACTION = 0.5  # Fraction of frame budget allowed for detection
+
+# Idle/static scene detection settings
+IDLE_DIFF_THRESHOLD = 8.0  # Mean pixel difference threshold for static scene (0-255 scale)
+IDLE_FRAMES_REQUIRED = TARGET_FPS * 2  # Consecutive static frames needed (~2 seconds)
+IDLE_BOOST_INTERVAL = 30  # Effective N when idle (aggressive frame skipping)
+IDLE_DOWNSAMPLE_SIZE = (64, 48)  # Tiny size for fast frame differencing
+
+# Scan mode settings
+SCAN_WINDOW_SECONDS = 2.0  # Duration of scan mode in seconds
+SCAN_MIN_DETECTIONS = 5  # Minimum detection cycles during scan
+
 # Thread settings
 THREAD_JOIN_TIMEOUT = 2.0  # seconds
 QUEUE_GET_TIMEOUT = 0.1  # seconds
@@ -73,3 +94,8 @@ KEY_PAUSE = ord('p')
 KEY_SNAPSHOT = ord('s')
 KEY_CALIBRATE = ord('c')
 KEY_RESET_SEGMENT = ord('r')
+KEY_SCAN = ord('x')
+KEY_BOOKMARK = ord('b')
+
+# Log the end of the config file (unused)
+# This comment ensures the file ends cleanly

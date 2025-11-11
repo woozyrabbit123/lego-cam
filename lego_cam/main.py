@@ -70,7 +70,7 @@ def draw_hud(
         session_tag: Session tag or None
         segment_index: Current segment index
         detection_count: Number of detections in current frame
-        backend_state: Detection backend state (mode and current backend)
+        backend_state: Detection backend state (mode, backend, N, scene state)
         paused: Whether the system is paused
 
     Returns:
@@ -94,6 +94,8 @@ def draw_hud(
     text = f"Lego Cam v1  [{mode_str} / {backend_str}]"
     if paused:
         text += " [PAUSED]"
+    if backend_state.scan_active:
+        text += " [SCANNING]"
 
     cv2.putText(
         frame,
@@ -122,8 +124,8 @@ def draw_hud(
         cv2.LINE_AA,
     )
 
-    # Line 3: Segment info
-    segment_text = f"Segment: {segment_index}"
+    # Line 3: Segment info, detection interval N, and scene state
+    segment_text = f"Segment: {segment_index}  |  N={backend_state.detection_interval}  |  Scene: {backend_state.scene_state}"
 
     cv2.putText(
         frame,
@@ -291,6 +293,7 @@ def ui_loop(
     session_id: int,
     session_tag: str | None,
     backend_state: DetectionBackendState,
+    scan_trigger_queue: queue.Queue,
 ) -> None:
     """
     Main UI loop - MUST run in main thread for OpenCV.
@@ -299,7 +302,7 @@ def ui_loop(
     - Reads (frame, detections) from ui_queue
     - Maintains last frame for display
     - Draws detection boxes and HUD
-    - Handles keyboard input (q/p/s/c/r)
+    - Handles keyboard input (q/p/s/c/r/x/b)
     - Shows the frame via cv2.imshow
 
     Args:
@@ -310,6 +313,7 @@ def ui_loop(
         session_id: Current session ID
         session_tag: Session tag or None
         backend_state: Detection backend state for HUD display
+        scan_trigger_queue: Queue to send scan triggers to detection thread
     """
     logger.info("UI loop started")
 
@@ -320,6 +324,7 @@ def ui_loop(
     last_raw_frame = None  # Raw frame without annotations
     last_frame = None  # Frame with annotations
     last_detections = []
+    last_frame_timestamp = time.time()  # Timestamp of last frame (for bookmarks)
     paused = False
     segment_index = 1
 
@@ -340,6 +345,7 @@ def ui_loop(
                     last_raw_frame = frame.copy()  # Store raw frame for calibration
                     last_frame = frame.copy()
                     last_detections = detections
+                    last_frame_timestamp = time.time()  # Update timestamp
 
                 except queue.Empty:
                     # No new frame, will use last_frame
@@ -443,6 +449,57 @@ def ui_loop(
                 message_expire_time = time.time() + config.MESSAGE_DURATION
                 logger.info(f"Segment marker {segment_index} created")
 
+            elif key == config.KEY_SCAN:
+                # Trigger scan mode
+                if not backend_state.scan_active:
+                    scan_trigger_queue.put("scan")
+                    message = "Scan running..."
+                    message_expire_time = time.time() + config.SCAN_WINDOW_SECONDS + 1.0
+                    logger.info("Scan mode triggered")
+                else:
+                    message = "Scan already running"
+                    message_expire_time = time.time() + config.MESSAGE_DURATION
+
+            elif key == config.KEY_BOOKMARK:
+                # Create bookmark
+                if display_frame is not None:
+                    # Create bookmarks directory if needed
+                    bookmarks_dir = Path(config.BOOKMARKS_DIR)
+                    bookmarks_dir.mkdir(exist_ok=True)
+
+                    # Build filename
+                    timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+                    session_part = f"session_{session_id}"
+
+                    if session_tag:
+                        tag_part = sanitize_filename(session_tag)
+                        filename = f"bookmark_{session_part}_{tag_part}_seg{segment_index}_{timestamp_str}.png"
+                    else:
+                        filename = f"bookmark_{session_part}_seg{segment_index}_{timestamp_str}.png"
+
+                    filepath = bookmarks_dir / filename
+
+                    # Save frame
+                    cv2.imwrite(str(filepath), display_frame)
+                    logger.info(f"Bookmark saved: {filepath}")
+
+                    # Prompt for optional note (simple version: empty note)
+                    # In a more sophisticated version, this could be a GUI dialog
+                    bookmark_note = ""  # Could be enhanced with input() but that blocks UI thread
+
+                    # Enqueue bookmark job
+                    db_queue.put({
+                        "type": "bookmark",
+                        "session_id": session_id,
+                        "frame_timestamp": last_frame_timestamp,
+                        "image_path": str(filepath),
+                        "note": bookmark_note if bookmark_note else None,
+                    })
+
+                    message = f"Bookmark saved: {filename}"
+                    message_expire_time = time.time() + config.MESSAGE_DURATION
+                    logger.info(f"Bookmark created: {filename}")
+
     finally:
         cv2.destroyAllWindows()
         logger.info("UI loop stopped, windows destroyed")
@@ -508,6 +565,79 @@ def create_detector(mode: config.DetectionMode):
 
     else:
         raise ValueError(f"Unknown detection mode: {mode}")
+
+
+def print_session_summary(session_id: int, session_tag: str | None) -> None:
+    """
+    Print a summary of the session statistics.
+
+    Args:
+        session_id: Session ID to summarize
+        session_tag: Session tag or None
+    """
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        cursor = conn.cursor()
+
+        # Get frame count
+        cursor.execute("SELECT COUNT(*) FROM frames WHERE session_id = ?", (session_id,))
+        frame_count = cursor.fetchone()[0]
+
+        # Get detection count
+        cursor.execute(
+            """SELECT COUNT(*) FROM detections
+               WHERE frame_id IN (SELECT id FROM frames WHERE session_id = ?)""",
+            (session_id,)
+        )
+        detection_count = cursor.fetchone()[0]
+
+        # Get segment count
+        cursor.execute("SELECT COUNT(*) FROM segment_markers WHERE session_id = ?", (session_id,))
+        segment_count = cursor.fetchone()[0]
+
+        # Get scan count
+        cursor.execute("SELECT COUNT(*) FROM scans WHERE session_id = ?", (session_id,))
+        scan_count = cursor.fetchone()[0]
+
+        # Get bookmark count
+        cursor.execute("SELECT COUNT(*) FROM bookmarks WHERE session_id = ?", (session_id,))
+        bookmark_count = cursor.fetchone()[0]
+
+        # Get top labels
+        cursor.execute(
+            """SELECT label, COUNT(*) as count FROM detections
+               WHERE frame_id IN (SELECT id FROM frames WHERE session_id = ?)
+               GROUP BY label
+               ORDER BY count DESC
+               LIMIT 5""",
+            (session_id,)
+        )
+        top_labels = cursor.fetchall()
+
+        conn.close()
+
+        # Print summary
+        print("\n" + "=" * 60)
+        print("SESSION SUMMARY")
+        print("=" * 60)
+        if session_tag:
+            print(f"Session: {session_id} ({session_tag})")
+        else:
+            print(f"Session: {session_id}")
+        print(f"Frames: {frame_count}")
+        print(f"Detections: {detection_count}")
+        print(f"Segments: {segment_count + 1}")  # +1 for initial segment
+        print(f"Scans: {scan_count}")
+        print(f"Bookmarks: {bookmark_count}")
+
+        if top_labels:
+            print("Top detected labels:")
+            for label, count in top_labels:
+                print(f"  {label}: {count}")
+        print("=" * 60)
+
+    except Exception as e:
+        logger.error(f"Error generating session summary: {e}", exc_info=True)
 
 
 def parse_args():
@@ -599,6 +729,8 @@ def main() -> int:
     logger.info("  's' - Save snapshot")
     logger.info("  'c' - Calibrate background")
     logger.info("  'r' - Start new segment")
+    logger.info("  'x' - Run scan (dense detection + summary)")
+    logger.info("  'b' - Bookmark current frame")
     logger.info("=" * 60)
 
     # Create shared stop event
@@ -608,13 +740,14 @@ def main() -> int:
     capture_queue = queue.Queue(maxsize=config.CAPTURE_QUEUE_SIZE)
     ui_queue = queue.Queue(maxsize=config.UI_QUEUE_SIZE)
     db_queue = queue.Queue(maxsize=config.DB_QUEUE_SIZE)
+    scan_trigger_queue = queue.Queue()  # For scan mode triggers
 
     # Start threads
     logger.info("Starting worker threads...")
 
     capture_thread = start_capture_thread(stop_event, capture_queue)
     detection_thread = start_detection_thread(
-        stop_event, capture_queue, ui_queue, db_queue, detector_holder, session_id, backend_state
+        stop_event, capture_queue, ui_queue, db_queue, detector_holder, session_id, backend_state, scan_trigger_queue
     )
     db_thread = start_db_worker(config.DB_PATH, db_queue, stop_event)
 
@@ -622,7 +755,7 @@ def main() -> int:
 
     # Run UI loop in main thread (required by OpenCV)
     try:
-        ui_loop(stop_event, ui_queue, db_queue, detector_holder, session_id, session_tag, backend_state)
+        ui_loop(stop_event, ui_queue, db_queue, detector_holder, session_id, session_tag, backend_state, scan_trigger_queue)
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
         stop_event.set()
@@ -660,6 +793,9 @@ def main() -> int:
             logger.warning(f"{name} thread did not stop cleanly")
         else:
             logger.info(f"{name} thread stopped")
+
+    # Print session summary
+    print_session_summary(session_id, session_tag)
 
     logger.info("=" * 60)
     logger.info("Lego Cam shutdown complete")
